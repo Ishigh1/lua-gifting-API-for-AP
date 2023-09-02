@@ -100,7 +100,7 @@ function module:send_gift(gift)
         receiver_name = gift.ReceiverName
     end
 
-    for _, player in pairs(self:get_players()) do
+    for _, player in pairs(self.ap:get_players()) do
         if player.name == receiver_name or player.alias == receiver_name then
             gift.receiver_team = player.team
             gift.receiver_number = player.slot
