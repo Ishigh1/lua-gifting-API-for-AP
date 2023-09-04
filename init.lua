@@ -78,7 +78,7 @@ local function add_gift_to_giftbox(gift)
     gift.receiver_team = nil
     gift.receiver_number = nil
 
-    module.ap:Set(giftbox_name, {}, false, {{"update", {gift.ID, gift}}})
+    module.ap:Set(giftbox_name, {}, false, {{"update", {[gift.ID] = gift}}})
 end
 
 local function check_gift(gift)
