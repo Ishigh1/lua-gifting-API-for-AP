@@ -17,6 +17,7 @@ Implemented functions :
 
 * start_gift_recovery(int)
 - asks the API to gather the given number of gifts from your giftbox. If the number is negative, the API will recover all the gifts. Note that this method returns nothings, gifts can only be seen with the gift handler. The use of this method to recover all gifts is advised when possible.
+- returns false if the giftbox was closed
 
 * send_gift(gift)
 - tries to add the given gift to the receiver, putting it back into your own giftbox if the receiver was not found, didn't have an opened gift_box or didn't allow the gift. The gift must at least contain Item.Name, Traits, and ReceiverName

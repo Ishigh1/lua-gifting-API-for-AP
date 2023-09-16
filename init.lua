@@ -1,9 +1,21 @@
 local module = {}
+local protocol_version = 2
+
+local function pseudo_hash(str)
+    local hash = 5381
+
+    for i = 1, #str do
+        hash = ((hash << 5) + hash) + string.byte(str, i)
+    end
+
+    return hash
+end
 
 -- Function to generate a pseudo-GUID
-local function generate_GUID()
+local function generate_GUID(extra_random)
     local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
-    return string.gsub(template, '[xy]', function (c)
+    math.randomseed(pseudo_hash(os.time() .. "|" .. extra_random))
+    return string.gsub(template, '[xy]', function(c)
         local v = (c == 'x') and math.random(0, 15) or math.random(8, 11)
         return string.format('%x', v)
     end)
@@ -20,28 +32,22 @@ function module:open_giftbox(any_gift, traits)
         traits = module.ap.EMPTY_ARRAY
     end
 
-    local giftbox_name = "GiftBox;" .. self.ap:get_team_number() .. ";" .. self.ap:get_player_number()
-    module.ap:Set(giftbox_name, {}, false, {{"default", true}})
-    module.ap:SetNotify({giftbox_name})
-    module.ap:Set("GiftBoxes;" .. self.ap:get_team_number(), {}, true, {{"update", {
-        [module.ap:get_player_number()] = {
-            IsOpen = true,
-            AcceptsAnyGift = any_gift,
-            DesiredTraits = traits
-        },
-        dummy = true -- This is only to be recognized as an object, not a list
-    }}, {"pop", "dummy"}})
+    module.ap:Get("GiftBoxes;" .. self.ap:get_team_number(), {
+        id = module.id,
+        action = "open_giftbox",
+        any_gift = any_gift,
+        traits = traits
+    })
 end
 
 function module:close_giftbox()
-    self.giftbox_preferences = module.ap:Set("GiftBoxes;" .. self.ap:get_team_number(), {}, false, {{"update", {
-        [module.ap:get_player_number()] = {
-            IsOpen = false,
-            AcceptsAnyGift = false,
-            DesiredTraits = module.ap.EMPTY_ARRAY
-        },
-        dummy = true
-    }}, {"pop", "dummy"}})
+    if not self.is_open then
+        return
+    end
+    module.ap:Get("GiftBoxes;" .. self.ap:get_team_number(), {
+        id = module.id,
+        action = "close_giftbox"
+    })
 end
 
 -- handlers
@@ -61,16 +67,24 @@ end
 -- gift transmitters
 
 function module:start_gift_recovery(gift_number)
+    if not self.is_open then
+        return false
+    end
     local giftbox_name = "GiftBox;" .. self.ap:get_team_number() .. ";" .. self.ap:get_player_number()
     if gift_number < 0 then
-        module.ap:Set(giftbox_name, {}, true, {{"replace", {}}}, {giftbox_gathering = self.ap:get_player_number()})
+        module.ap:Set(giftbox_name, {}, true, {{"replace", {}}}, {
+            giftbox_gathering = self.ap:get_player_number()
+        })
     else
         local operations = {}
         for i = 1, gift_number, 1 do
             operations[i] = {"pop", 0}
         end
-        module.ap:Set(giftbox_name, {}, true, operations, {giftbox_gathering = self.ap:get_player_number()})
+        module.ap:Set(giftbox_name, {}, true, operations, {
+            giftbox_gathering = self.ap:get_player_number()
+        })
     end
+    return true
 end
 
 local function add_gift_to_giftbox(gift)
@@ -78,18 +92,23 @@ local function add_gift_to_giftbox(gift)
     gift.receiver_team = nil
     gift.receiver_number = nil
 
-    module.ap:Set(giftbox_name, {}, false, {{"update", {[gift.ID] = gift}}})
+    module.ap:Set(giftbox_name, {}, false, {{"update", {
+        [gift.ID] = gift
+    }}})
 end
 
-local function check_gift(gift)
+local function start_checking_gift(gift)
     local motherbox = "GiftBoxes;" .. gift.receiver_team
 
-    module.ap:Get(motherbox, {id = module.id, gift = gift})
+    module.ap:Get(motherbox, {
+        id = module.id,
+        action = "check_gift",
+        gift = gift
+    })
 end
 
 function module:send_gift(gift)
-    assert(type(gift.Item) == "table")
-    assert(type(gift.Item.Name) == "string")
+    assert(type(gift.ItemName) == "string")
     assert(type(gift.ReceiverName) == "string")
 
     local receiver_name
@@ -108,14 +127,14 @@ function module:send_gift(gift)
     end
 
     if gift.ID == nil then
-        gift.ID = generate_GUID()
+        gift.ID = generate_GUID(module.ap:get_player_number() .. "|" .. gift.ItemName)
     end
 
-    if gift.Item.Amount == nil then
-        gift.Item.Amount = 1
+    if gift.Amount == nil then
+        gift.Amount = 1
     end
-    if gift.Item.Value == nil then
-        gift.Item.Value = 0
+    if gift.ItemValue == nil then
+        gift.ItemValue = 0
     end
 
     if gift.SenderName == nil then
@@ -146,8 +165,118 @@ function module:send_gift(gift)
     elseif gift.IsRefund then
         add_gift_to_giftbox(gift)
     else
-        check_gift(gift)
+        start_checking_gift(gift)
     end
+end
+
+-- callback functions
+
+local function check_gift(map, extra_data)
+    local gift = extra_data.gift
+    if map ~= nil then
+        local motherbox = map[tostring(gift.receiver_number)]
+        if motherbox ~= nil and motherbox.IsOpen then
+            local accepts_gift = motherbox.AcceptsAnyGift
+            if not accepts_gift then
+                for trait in gift.traits do
+                    for accepted_trait in motherbox.DesiredTraits do
+                        if trait == accepted_trait then
+                            accepts_gift = true
+                            break
+                        end
+                    end
+
+                    if accepts_gift then
+                        break
+                    end
+                end
+            end
+
+            if accepts_gift then
+                add_gift_to_giftbox(gift)
+                return
+            end
+        end
+    end
+    gift.IsRefund = true
+    module:send_gift(gift)
+end
+
+local function check_giftbox_info(motherbox)
+    local player_number = module.ap:get_player_number()
+    if motherbox ~= nil then
+        if type(motherbox) ~= "table" then
+            return false -- motherbox not recognized
+        else
+            local giftbox_info = motherbox[tostring(player_number)]
+            if giftbox_info ~= nil then
+                if type(giftbox_info) ~= "table" then
+                    return false -- giftbox not recognized
+                else
+                    if giftbox_info.MinimumGiftDataVersion ~= protocol_version or giftbox_info.MaximumGiftDataVersion ~= protocol_version then
+                        return false -- version system not recognized
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function open_giftbox(motherbox, giftbox_settings)
+    if not check_giftbox_info(motherbox) then
+        module.is_open = false -- Something has gone horribly wrong, this should only happen if the giftbox protocol has updated and is no longer recognized
+        return
+    end
+
+    local player_number = module.ap:get_player_number()
+
+    module.ap:Set("GiftBoxes;" .. self.ap:get_team_number(), {}, true, {{"update", {
+        [player_number] = {
+            IsOpen = true,
+            AcceptsAnyGift = giftbox_settings.any_gift,
+            DesiredTraits = giftbox_settings.traits,
+            MinimumGiftDataVersion = protocol_version,
+            MaximumGiftDataVersion = protocol_version
+        },
+        dummy = true -- This is only to be recognized as an object, not a list
+    }}, {"pop", "dummy"}})
+    
+    local giftbox_name = "GiftBox;" .. self.ap:get_team_number() .. ";" .. player_number
+    module.ap:Get(giftbox_name, {
+        id = module.id,
+        action = "initialize_giftbox"
+    })
+end
+
+local function initialize_giftbox(map)
+    local giftbox_name = "GiftBox;" .. self.ap:get_team_number() .. ";" .. self.ap:get_player_number()
+    local giftbox = map[giftbox_name]
+    if giftbox == nil then
+        module.ap:Set(giftbox_name, {}, {
+            giftbox_gathering = module.ap:get_player_number()
+        })
+    else
+        module.open_giftbox = false -- Something weird is happening and I won't touch it
+    end
+end
+
+local function close_giftbox(motherbox)
+    module.is_open = false
+
+    if not check_giftbox_info(motherbox) then -- just in case to be extra safe
+        return
+    end
+
+    module.ap:Set("GiftBoxes;" .. self.ap:get_team_number(), {}, true, {{"update", {
+        [self.ap:get_player_number()] = {
+            IsOpen = false,
+            AcceptsAnyGift = false,
+            DesiredTraits = module.ap.EMPTY_ARRAY,
+            MinimumGiftDataVersion = protocol_version,
+            MaximumGiftDataVersion = protocol_version
+        },
+        dummy = true -- This is only to be recognized as an object, not a list
+    }}, {"pop", "dummy"}})
 end
 
 -- ap function overrides
@@ -155,34 +284,15 @@ end
 local mod_on_retrieved = nil
 local function on_retrieved(map, keys, extra_data)
     if extra_data.id == module.id then
-        local gift = extra_data.gift
-        if map ~= nil then
-            local motherbox = map[tostring(gift.receiver_number)]
-            if motherbox ~= nil and motherbox.IsOpen then
-                local accepts_gift = motherbox.AcceptsAnyGift
-                if not accepts_gift then
-                    for trait in gift.traits do
-                        for accepted_trait in motherbox.DesiredTraits do
-                            if trait == accepted_trait then
-                                accepts_gift = true
-                                break
-                            end
-                        end
-
-                        if accepts_gift then 
-                            break 
-                        end
-                    end
-                end
-
-                if accepts_gift then
-                    add_gift_to_giftbox(gift)
-                    return
-                end
-            end
+        if extra_data.action == "check_gift" then
+            check_gift(map, extra_data)
+        elseif extra_data.action == "open_giftbox" then
+            open_giftbox(map, extra_data)
+        elseif extra_data.action == "initialize_giftbox" then
+            initialize_giftbox(map)
+        elseif extra_data.action == "close_giftbox" then
+            close_giftbox(map)
         end
-        gift.IsRefund = true
-        module:send_gift(gift)
     elseif mod_on_retrieved ~= nil then
         mod_on_retrieved(map, keys, extra_data)
     end
@@ -222,6 +332,7 @@ end
 function module:init(ap)
     self.ap = ap
     self.id = generate_GUID()
+    self.is_open = false
 
     ap:set_retrieved_handler(on_retrieved)
     ap.set_retrieved_handler = set_retrieved_handler
