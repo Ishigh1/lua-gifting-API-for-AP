@@ -154,7 +154,7 @@ function module:send_gift(gift)
     end
 
     if gift.GiftValue == nil then
-        gift.GiftValue = gift.Item.Value * gift.Item.Amount
+        gift.GiftValue = gift.Value * gift.Amount
     end
 
     if gift.receiver_number == nil then
